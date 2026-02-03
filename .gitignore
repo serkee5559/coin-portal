@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/venv/
+__pycache__/
+*.pyc
+.python-version
+
+# Build / Output
+dist/
+frontend/dist/
+.vercel/
+.fly/
+
+# Environment / Secrets
+.env
+.env.local
+.env*.local
+
+# OS
+.DS_Store
+at-last-state.json

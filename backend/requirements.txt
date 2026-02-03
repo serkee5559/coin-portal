@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+websockets
+sqlalchemy
+psycopg2-binary
+redis
+pandas
+# pandas-ta (install manually if needed)
+httpx
+python-dotenv
+pydantic-settings
+python-multipart
