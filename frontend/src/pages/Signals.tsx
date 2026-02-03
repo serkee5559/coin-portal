@@ -12,25 +12,36 @@ const Signals: React.FC = () => {
    const [history, setHistory] = useState<any[]>([]);
 
    // Supabase에서 데이터 불러오기
+   const fetchData = async () => {
+      // 알림 리스트 불러오기 (v4: is_active 필드 매핑 확인)
+      const { data: alertsData } = await supabase
+         .from('alerts')
+         .select('*')
+         .order('created_at', { ascending: false });
+
+      if (alertsData) {
+         // UI에서 사용하는 'active' 속성이 DB의 'is_active'와 일치하도록 매핑
+         const mappedData = alertsData.map(a => ({
+            ...a,
+            active: a.is_active
+         }));
+         setAlerts(mappedData);
+      }
+
+      // 히스토리 불러오기
+      const { data: historyData } = await supabase
+         .from('alert_history')
+         .select('*')
+         .order('triggered_at', { ascending: false });
+
+      if (historyData) setHistory(historyData);
+   };
+
    useEffect(() => {
-      const fetchData = async () => {
-         // 알림 리스트 불러오기
-         const { data: alertsData } = await supabase
-            .from('alerts')
-            .select('*')
-            .order('created_at', { ascending: false });
-
-         if (alertsData) setAlerts(alertsData);
-
-         // 히스토리 불러오기
-         const { data: historyData } = await supabase
-            .from('alert_history')
-            .select('*')
-            .order('triggered_at', { ascending: false });
-
-         if (historyData) setHistory(historyData);
-      };
       fetchData();
+      // 실시간 알림 발생 시 히스토리 동기화를 위해 주기적 새로고침 추가 (10초)
+      const interval = setInterval(fetchData, 10000);
+      return () => clearInterval(interval);
    }, []);
 
    const [threshold, setThreshold] = useState(5);
