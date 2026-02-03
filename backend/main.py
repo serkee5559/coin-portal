@@ -11,9 +11,27 @@ from datetime import datetime
 import pandas as pd
 from utils.indicators import calculate_manual_rsi
 from services.portfolio import calculate_portfolio
+from upstash_redis import Redis
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+REDIS_URL = os.getenv("REDIS_URL")
+REDIS_TOKEN = os.getenv("REDIS_TOKEN")
+
+def get_redis_client():
+    if REDIS_URL and REDIS_TOKEN:
+        return Redis(url=REDIS_URL, token=REDIS_TOKEN)
+    return None
+
+redis_client = get_redis_client()
 
 app = FastAPI(title="Fast-Crypto Dash API")
 
@@ -67,13 +85,13 @@ async def signal_detector():
                         prices = df['trade_price'].tolist()[::-1]
                         rsi = calculate_manual_rsi(prices)
                         
-                        if rsi and (rsi < 30 or rsi > 70):
+                        if rsi and (rsi < 40 or rsi > 60):  # Relaxed for testing
                             signal = {
                                 "type": "signal",
                                 "symbol": symbol,
                                 "rsi": rsi,
-                                "action": "BUY" if rsi < 30 else "SELL",
-                                "message": f"{symbol} RSI is {rsi:.2f} - {'Oversold' if rsi < 30 else 'Overbought'}!",
+                                "action": "BUY" if rsi < 40 else "SELL",
+                                "message": f"{symbol} RSI is {rsi:.2f} - {'Oversold' if rsi < 40 else 'Overbought'}!",
                                 "timestamp": datetime.now().strftime("%H:%M:%S")
                             }
                             await manager.broadcast(json.dumps(signal))
@@ -81,6 +99,72 @@ async def signal_detector():
             await asyncio.sleep(60) # Check every minute
         except Exception as e:
             logger.error(f"Signal detector error: {e}")
+            await asyncio.sleep(10)
+
+async def user_alert_monitoring():
+    """
+    Check user-defined alerts from Supabase against live market data
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.warning("Supabase credentials missing. User alert monitoring disabled.")
+        return
+
+    while True:
+        try:
+            # Fetch active alerts from Supabase
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json"
+            }
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{SUPABASE_URL}/rest/v1/alerts?is_active=eq.true", headers=headers)
+                if resp.status_code == 200:
+                    alerts = resp.json()
+                    for alert in alerts:
+                        symbol = alert.get("asset") # E.g. "BTC"
+                        # Normalize symbol for comparison (Upbit uses KRW-BTC)
+                        upbit_symbol = f"KRW-{symbol}" if not symbol.startswith("KRW-") else symbol
+                        
+                        current_data = market_data.get(upbit_symbol)
+                        if not current_data:
+                            continue
+                        
+                        current_price = current_data["price"]
+                        target_price = alert["price"]
+                        condition = alert["condition"] # "이상" or "이하"
+                        
+                        triggered = False
+                        if condition == "이상" and current_price >= target_price:
+                            triggered = True
+                        elif condition == "이하" and current_price <= target_price:
+                            triggered = True
+                        
+                        if triggered:
+                            logger.info(f"Alert triggered! {symbol} {condition} {target_price}")
+                            # 1. Insert into history
+                            history_data = {
+                                "asset": symbol,
+                                "price": target_price,
+                                "condition": condition,
+                                "triggered_at": datetime.now().isoformat()
+                            }
+                            await client.post(f"{SUPABASE_URL}/rest/v1/alert_history", headers=headers, json=history_data)
+                            
+                            # 2. Mark alert as inactive
+                            await client.patch(f"{SUPABASE_URL}/rest/v1/alerts?id=eq.{alert['id']}", headers=headers, json={"is_active": False})
+                            
+                            # 3. Broadcast to UI
+                            trigger_msg = {
+                                "type": "alert_triggered",
+                                "message": f"{symbol} 가격이 {target_price:,.0f} {condition}에 도달했습니다!",
+                                "timestamp": datetime.now().strftime("%H:%M:%S")
+                            }
+                            await manager.broadcast(json.dumps(trigger_msg))
+            
+            await asyncio.sleep(10) # Check user alerts every 10 seconds
+        except Exception as e:
+            logger.error(f"User alert monitoring error: {e}")
             await asyncio.sleep(10)
 
 market_stats: Dict = {
@@ -122,9 +206,11 @@ async def market_stats_updater():
                 if global_resp.status_code == 200:
                     g_data = global_resp.json()['data']
                     total_cap_usd = g_data['total_market_cap']['usd']
-                    market_stats["market_cap"] = f"₩{(total_cap_usd * usd_krw / 1e12):.1f}T"
-                    market_stats["dominance"] = f"{g_data['market_cap_percentage']['btc']:.1f}%"
                     market_stats["market_cap_change"] = f"{g_data['market_cap_change_percentage_24h_usd']:.1f}%"
+                
+                # Cache stats in Redis
+                if redis_client:
+                    redis_client.set("market_stats", json.dumps(market_stats), ex=60)
             
             await asyncio.sleep(60)
         except Exception as e:
@@ -169,6 +255,10 @@ async def upbit_ws_client():
                         # Broadcast to all connected clients
                         await manager.broadcast(json.dumps(market_data[code]))
                         
+                        # Cache in Redis for persistence/scaling
+                        if redis_client:
+                            redis_client.set(f"price:{code}", json.dumps(market_data[code]), ex=10)
+                        
         except Exception as e:
             logger.error(f"Upbit WebSocket error: {e}")
             await asyncio.sleep(5)  # Retry after 5 seconds
@@ -179,6 +269,7 @@ async def startup_event():
     asyncio.create_task(upbit_ws_client())
     asyncio.create_task(signal_detector())
     asyncio.create_task(market_stats_updater())
+    asyncio.create_task(user_alert_monitoring())
 
 @app.get("/")
 async def root():
@@ -190,6 +281,10 @@ async def get_market_summary():
 
 @app.get("/api/v1/market-stats")
 async def get_market_stats():
+    if redis_client:
+        cached = redis_client.get("market_stats")
+        if cached:
+            return json.loads(cached)
     return market_stats
 
 @app.get("/api/v1/indicators/{symbol}")

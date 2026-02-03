@@ -10,3 +10,4 @@ httpx
 python-dotenv
 pydantic-settings
 python-multipart
+upstash-redis
