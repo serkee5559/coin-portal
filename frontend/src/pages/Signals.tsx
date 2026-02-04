@@ -39,9 +39,23 @@ const Signals: React.FC = () => {
 
    useEffect(() => {
       fetchData();
+
+      // 실시간 알림 이벤트 리스너 등록
+      const handleTriggered = (e: any) => {
+         const { message } = e.detail;
+         showNotification(message, 'info');
+         fetchData(); // 데이터 즉시 갱신
+      };
+
+      window.addEventListener('crypto_alert_triggered', handleTriggered);
+
       // 실시간 알림 발생 시 히스토리 동기화를 위해 주기적 새로고침 추가 (10초)
       const interval = setInterval(fetchData, 10000);
-      return () => clearInterval(interval);
+
+      return () => {
+         window.removeEventListener('crypto_alert_triggered', handleTriggered);
+         clearInterval(interval);
+      };
    }, []);
 
    const [threshold, setThreshold] = useState(5);

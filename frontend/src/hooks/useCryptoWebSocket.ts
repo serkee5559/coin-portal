@@ -39,7 +39,10 @@ export const useCryptoWebSocket = () => {
                 setData(message.data);
             } else if (message.type === 'signal') {
                 setSignals((prev) => [message, ...prev].slice(0, 10));
-            } else {
+            } else if (message.type === 'alert_triggered') {
+                // Dispatch a custom event so components can show toasts
+                window.dispatchEvent(new CustomEvent('crypto_alert_triggered', { detail: message }));
+            } else if (message.code) {
                 // Buffer individual updates
                 buffer.current[message.code] = message;
             }
